@@ -17,23 +17,19 @@ from homeassistant.components.notify import (
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({vol.Required(CONF_TOKEN): cv.string})
-
 ATTR_IMAGES = "images"
 
 
 def get_service(hass, config, discovery_info=None):
     """Get the Discord notification service."""
-    token = config.get(CONF_TOKEN)
-    return DiscordNotificationService(hass, token)
+    return DiscordNotificationService(hass)
 
 
 class DiscordNotificationService(BaseNotificationService):
     """Implement the notification service for Discord."""
 
-    def __init__(self, hass, token):
+    def __init__(self, hass):
         """Initialize the service."""
-        self.token = token
         self.hass = hass
 
     def file_exists(self, filename):
@@ -44,10 +40,8 @@ class DiscordNotificationService(BaseNotificationService):
         return os.path.isfile(filename)
 
     async def async_send_message(self, message, **kwargs):
-        """Login to Discord, send message to channel(s) and log out."""
+        """Using a discord webhook, post a message to specified target(s)."""
 
-        discord.VoiceClient.warn_nacl = False
-        discord_bot = discord.Client()
         images = None
 
         if ATTR_TARGET not in kwargs:
@@ -65,35 +59,23 @@ class DiscordNotificationService(BaseNotificationService):
                 )
 
                 if image_exists:
-                    images.append(image)
+                    images.append(discord.File(image))
                 else:
                     _LOGGER.warning("Image not found: %s", image)
 
-        # pylint: disable=unused-variable
-        @discord_bot.event
-        async def on_ready():
-            """Send the messages when the bot is ready."""
-            try:
-                for channelid in kwargs[ATTR_TARGET]:
-                    channelid = int(channelid)
-                    channel = discord_bot.get_channel(channelid)
+        try:
+            for url in kwargs[ATTR_TARGET]:
+                try:
+                    webhook = discord.Webhook.from_url(url, adapter=discord.AsyncWebhookAdapter(session))
+                    webhook.send(message, files=files)
+                except (discord.errors.InvalidArgument, ) as error:
+                    _LOGGER.warning("Invalid webhook url: %s", url)
+                    continue
+                except (discord.errors.Forbidden, discord.errors.NotFound) as error:
+                    _LOGGER.warning("Webhook is no longer valid or has been deleted: %s\n%s", url, error)
+                    continue
 
-                    if channel is None:
-                        _LOGGER.warning("Channel not found for id: %s", channelid)
-                        continue
-
-                    # Must create new instances of File for each channel.
-                    files = None
-                    if images:
-                        files = list()
-                        for image in images:
-                            files.append(discord.File(image))
-
-                    await channel.send(message, files=files)
-            except (discord.errors.HTTPException, discord.errors.NotFound) as error:
-                _LOGGER.warning("Communication error: %s", error)
-            await discord_bot.logout()
-            await discord_bot.close()
-
-        # Using reconnect=False prevents multiple ready events to be fired.
-        await discord_bot.start(self.token, reconnect=False)
+                webhook.send(message, files=files)
+        except (discord.errors.HTTPException, ) as error:
+            _LOGGER.warning("Communication error: %s", error)
+        
